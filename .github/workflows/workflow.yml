@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push: # The worflow will be trigger whenever our code is pushed into main repository.
+    branches:
+      - "main"
+  workflow_dispatch: # Allow us to manually trigger the workflow.
+
+jobs:
+  build_and_push: # The job's name. It usually describes action(s) in overall.
+    runs-on: ubuntu-latest # The os on which our code will be run
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install doctl CLI
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - name: Build a container image
+        run: docker build -t ${{ secrets.REGISTRY_NAME }}/demo-docker:$(echo $GITHUB_SHA | head -c7) .
+      - name: Log in to DigitalOcean Container Registry with short-lived credentials
+        run: doctl registry login --expiry-seconds 1200
+      - name: Remove all old images from DigitalOcean Container Registry
+        run: |
+          if [ ! -z "$(doctl registry repository list | grep "demo-docker")" ]; \
+          then doctl registry repository delete-manifest demo-docker $(doctl registry repository list-tags demo-docker | grep -o "sha.*") --force; \ 
+          else echo "No repository"; \
+          fi
+      - name: Push the image to DigitalOcean Container Registry
+        run: docker push ${{ secrets.REGISTRY_NAME }}/demo-docker:$(echo $GITHUB_SHA | head -c7)
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: build_and_push
+    steps:
+      - name: Deploy to DigitalOcean droplet via SSH action
+        uses: appleboy/ssh-action@v0.1.10
+        env:
+          REGISTRY_NAME: ${{ secrets.REGISTRY_NAME }}
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSHKEY }}
+          envs: REGISTRY_NAME, DIGITALOCEAN_ACCESS_TOKEN, GITHUB_SHA
+          script: |
+            docker login -u ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }} -p ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }} registry.digitalocean.com
+            if [ ! -z "$(docker ps | grep "demo-docker")" ]; then docker stop demo-docker && docker rm demo-docker; else echo "No running container found"; fi
+            docker run -d -p 3000:3000 --restart always --name demo-docker ${{ secrets.REGISTRY_NAME }}/demo-docker:$(echo $GITHUB_SHA | head -c7)
